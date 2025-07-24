@@ -87,8 +87,8 @@ class RWKV_Tmix_x070(MyModule):
         C = args.n_embd
 
         with torch.no_grad():
-            ratio_0_to_1 = layer_id / (args.n_layer - 1)  # 0 to 1
-            ratio_1_to_almost0 = 1.0 - (layer_id / args.n_layer)  # 1 to ~0
+            ratio_0_to_1 = 0.5  # 0 to 1
+            ratio_1_to_almost0 = 0.5  # 1 to ~0
             ddd = torch.ones(1, 1, C)
             for i in range(C):
                 ddd[0, 0, i] = i / C
@@ -348,9 +348,11 @@ class RWKV(pl.LightningModule):
         x = self.emb(idx)
 
         v_first = torch.empty_like(x)
-        for block in self.blocks:
+        block = self.blocks[0]
+        for _ in range(12):
             if args.grad_cp == 1:
-                x, v_first = deepspeed.checkpointing.checkpoint(block, x, v_first)
+                # x, v_first = deepspeed.checkpointing.checkpoint(block, x, v_first)
+                pass
             else:
                 x, v_first = block(x, v_first)
 
