@@ -1,6 +1,6 @@
 # RWKV-7 "Goose" x070 (final release, "rc4a")
 
-**Train RWKV-7**: use /RWKV-v5/ and use --my_testing "x070" in demo-training-prepare.sh and demo-training-run.sh
+**Train RWKV-7**: see ./train_temp/src/
 
 Inference Demo:
 

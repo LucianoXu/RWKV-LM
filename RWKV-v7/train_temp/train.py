@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO)
 if __name__ == "__main__":
     from argparse import ArgumentParser
     from pytorch_lightning import Trainer
-    from pytorch_lightning.utilities import rank_zero_info, rank_zero_only
+    from lightning_utilities.core.rank_zero import rank_zero_info
     import pytorch_lightning as pl
 
     rank_zero_info("########## work in progress ##########")
@@ -56,6 +56,7 @@ if __name__ == "__main__":
     parser.add_argument("--my_exit_tokens", default=0, type=int)
 
     parser = Trainer.add_argparse_args(parser)
+    assert isinstance(parser, ArgumentParser)
     args = parser.parse_args()
 
     ########################################################################################################
@@ -129,11 +130,12 @@ if __name__ == "__main__":
 
     samples_per_epoch = args.epoch_steps * args.real_bsz
     tokens_per_epoch = samples_per_epoch * args.ctx_len
+    
     try:
         deepspeed_version = deepspeed.__version__
     except:
         deepspeed_version = None
-        pass
+        
     rank_zero_info(
         f"""
 ############################################################################

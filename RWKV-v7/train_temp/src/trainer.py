@@ -2,7 +2,7 @@ import os, math, time, datetime, subprocess
 import torch
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
-from pytorch_lightning.utilities import rank_zero_info, rank_zero_only
+from lightning_utilities.core.rank_zero import rank_zero_only
 
 def my_save(args, trainer, dd, ff):
     if 'deepspeed_stage_3' in args.strategy:
@@ -21,8 +21,9 @@ class train_callback(pl.Callback):
         real_step = trainer.global_step + args.epoch_begin * args.epoch_steps
 
         # LR schedule
+        # Here if we use negative my_exit_tokens, it will adopt an asymptotic cosine decay. But the training will stil end at abs(my_exit_tokens).
         w_step = args.warmup_steps
-
+        lr = 0.0
         if args.my_exit_tokens != 0: # cosine decay
             real_tokens = real_step * args.ctx_len * args.real_bsz
             warmup_tokens = w_step * args.ctx_len * args.real_bsz
@@ -42,6 +43,8 @@ class train_callback(pl.Callback):
                         f"{args.proj_dir}/rwkv-final.pth",
                     )
                     exit(0)
+        
+        # Linear warmup
         if trainer.global_step < w_step:
             lr = lr * (0.01 + 0.99 * trainer.global_step / w_step)
 
@@ -86,11 +89,12 @@ class train_callback(pl.Callback):
         if trainer.is_global_zero:  # logging
             t_now = time.time_ns()
             kt_s = 0
+            
             try:
                 t_cost = (t_now - trainer.my_time_ns) / 1e9
                 kt_s = token_per_step / t_cost / 1000
-                self.log("REAL it/s", 1.0 / t_cost, prog_bar=True, on_step=True)
-                self.log("Kt/s", kt_s, prog_bar=True, on_step=True)
+                pl_module.log("REAL it/s", 1.0 / t_cost, prog_bar=True, on_step=True)
+                pl_module.log("Kt/s", kt_s, prog_bar=True, on_step=True)
             except:
                 pass
             trainer.my_time_ns = t_now
@@ -98,8 +102,8 @@ class train_callback(pl.Callback):
             trainer.my_loss_sum += trainer.my_loss
             trainer.my_loss_count += 1
             trainer.my_epoch_loss = trainer.my_loss_sum / trainer.my_loss_count
-            self.log("lr", trainer.my_lr, prog_bar=True, on_step=True)
-            self.log("loss", trainer.my_epoch_loss, prog_bar=True, on_step=True)
+            pl_module.log("lr", trainer.my_lr, prog_bar=True, on_step=True)
+            pl_module.log("loss", trainer.my_epoch_loss, prog_bar=True, on_step=True)
 
             if len(args.wandb) > 0:
                 lll = {"loss": trainer.my_loss, "lr": trainer.my_lr, "wd": trainer.my_wd, "Gtokens": real_step * token_per_step / 1e9}
