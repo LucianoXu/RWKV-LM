@@ -35,6 +35,8 @@ if os.environ["RWKV_JIT_ON"] == "1":
 
 from torch.utils.cpp_extension import load
 
+from torch.nn.utils import skip_init
+
 HEAD_SIZE = int(os.environ["RWKV_HEAD_SIZE"])
 
 if 'x070' in os.environ["RWKV_MY_TESTING"]:
@@ -73,7 +75,12 @@ if 'x070' in os.environ["RWKV_MY_TESTING"]:
 ########################################################################################################
 
 class RWKV_Tmix_x070(MyModule):
+
     def __init__(self, args, layer_id):
+        '''
+        The parameters are not initialized in the constructor.
+        '''
+
         super().__init__()
         self.args = args
         self.layer_id = layer_id
@@ -82,82 +89,130 @@ class RWKV_Tmix_x070(MyModule):
         self.head_size = args.head_size
         self.n_head = args.dim_att // self.head_size
         assert args.dim_att % self.n_head == 0
+
         H = self.n_head
         N = self.head_size
         C = args.n_embd
 
-        with torch.no_grad():
-            ratio_0_to_1 = layer_id / (args.n_layer - 1)  # 0 to 1
-            ratio_1_to_almost0 = 1.0 - (layer_id / args.n_layer)  # 1 to ~0
-            ddd = torch.ones(1, 1, C)
-            for i in range(C):
-                ddd[0, 0, i] = i / C
+        # the parameters
+        self.x_r = nn.Parameter(torch.empty(1, 1, C))
+        self.x_w = nn.Parameter(torch.empty(1, 1, C))
+        self.x_k = nn.Parameter(torch.empty(1, 1, C))
+        self.x_v = nn.Parameter(torch.empty(1, 1, C))
+        self.x_a = nn.Parameter(torch.empty(1, 1, C))
+        self.x_g = nn.Parameter(torch.empty(1, 1, C))
 
-            self.x_r = nn.Parameter(1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0))
-            self.x_w = nn.Parameter(1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0))
-            self.x_k = nn.Parameter(1.0 - torch.pow(ddd, 0.7 * ratio_1_to_almost0))
-            self.x_v = nn.Parameter(1.0 - torch.pow(ddd, 0.7 * ratio_1_to_almost0))
-            self.x_a = nn.Parameter(1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0))
-            self.x_g = nn.Parameter(1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0))
+        self.D_DECAY_LORA = max(32, int(round(  (2.5*(C**0.5))  /32)*32)) # suggestion
+        self.w1 = nn.Parameter(torch.empty(C, self.D_DECAY_LORA))
+        self.w2 = nn.Parameter(torch.empty(self.D_DECAY_LORA, C))
+        self.w0 = nn.Parameter(torch.empty(1, 1, C))
 
-            def ortho_init(x, scale):
-                with torch.no_grad():
-                    shape = x.shape
-                    if len(shape) == 2:
-                        gain = math.sqrt(shape[0] / shape[1]) if shape[0] > shape[1] else 1
-                        nn.init.orthogonal_(x, gain=gain * scale)
-                    elif len(shape) == 3:
-                        gain = math.sqrt(shape[1] / shape[2]) if shape[1] > shape[2] else 1
-                        for i in range(shape[0]):
-                            nn.init.orthogonal_(x[i], gain=gain * scale)
-                    else:
-                        assert False
-                    return x
+        self.D_AAA_LORA = max(32, int(round(  (2.5*(C**0.5))  /32)*32)) # suggestion
+        self.a1 = nn.Parameter(torch.empty(C, self.D_AAA_LORA))
+        self.a2 = nn.Parameter(torch.empty(self.D_AAA_LORA, C))
+        self.a0 = nn.Parameter(torch.empty(1, 1, C))
 
-            www = torch.zeros(C)
-            zigzag = torch.zeros(C)
-            linear = torch.zeros(C)
-            for n in range(C):
-                linear[n] = n / (C-1) - 0.5
-                zigzag[n] = ((n % N) - ((N-1) / 2)) / ((N-1) / 2)
-                zigzag[n] = zigzag[n] * abs(zigzag[n])
-                www[n] = -6 + 6 * (n / (C - 1)) ** (1 + 1 * ratio_0_to_1 ** 0.3)
+        self.D_MV_LORA = max(32, int(round(  (1.7*(C**0.5))  /32)*32)) # suggestion
+        self.v1 = nn.Parameter(torch.empty(C, self.D_MV_LORA))
+        self.v2 = nn.Parameter(torch.empty(self.D_MV_LORA, C))
+        self.v0 = nn.Parameter(torch.empty(1, 1, C))
 
-            D_DECAY_LORA = max(32, int(round(  (2.5*(C**0.5))  /32)*32)) # suggestion
-            self.w1 = nn.Parameter(torch.zeros(C, D_DECAY_LORA))
-            self.w2 = nn.Parameter(ortho_init(torch.zeros(D_DECAY_LORA, C), 0.1))
-            self.w0 = nn.Parameter(www.reshape(1,1,C) + 0.5 + zigzag*2.5) # !!! 0.5 comes from F.softplus !!!
+        # Note: for some data, you can reduce D_GATE_LORA or even remove this gate
+        self.D_GATE_LORA = max(32, int(round(  (5*(C**0.5))  /32)*32)) # suggestion
+        self.g1 = nn.Parameter(torch.empty(C, self.D_GATE_LORA))
+        self.g2 = nn.Parameter(torch.empty(self.D_GATE_LORA, C))
 
-            D_AAA_LORA = max(32, int(round(  (2.5*(C**0.5))  /32)*32)) # suggestion
-            self.a1 = nn.Parameter(torch.zeros(C, D_AAA_LORA))
-            self.a2 = nn.Parameter(ortho_init(torch.zeros(D_AAA_LORA, C), 0.1))
-            self.a0 = nn.Parameter(torch.zeros(1,1,C)-0.19 + zigzag*0.3 + linear*0.4)
+        self.k_k = nn.Parameter(torch.empty(1, 1, C))
+        self.k_a = nn.Parameter(torch.empty(1, 1, C))
+        self.r_k = nn.Parameter(torch.empty(H, N))
 
-            D_MV_LORA = max(32, int(round(  (1.7*(C**0.5))  /32)*32)) # suggestion
-            self.v1 = nn.Parameter(torch.zeros(C, D_MV_LORA))
-            self.v2 = nn.Parameter(ortho_init(torch.zeros(D_MV_LORA, C), 0.1))
-            self.v0 = nn.Parameter(torch.zeros(1,1,C)+0.73 - linear*0.4)
+        self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
+        self.receptance = skip_init(nn.Linear, C, C, bias=False)
+        self.key = skip_init(nn.Linear, C, C, bias=False)
+        self.value = skip_init(nn.Linear, C, C, bias=False)
+        self.output = skip_init(nn.Linear, C, C, bias=False)
+        self.ln_x = skip_init(nn.GroupNorm, H, C, eps=64e-5) # !!! notice eps value !!!
 
-            # Note: for some data, you can reduce D_GATE_LORA or even remove this gate
-            D_GATE_LORA = max(32, int(round(  (5*(C**0.5))  /32)*32)) # suggestion
-            self.g1 = nn.Parameter(torch.zeros(C, D_GATE_LORA))
-            self.g2 = nn.Parameter(ortho_init(torch.zeros(D_GATE_LORA, C), 0.1))
 
-            self.k_k = nn.Parameter(torch.zeros(1,1,C)+0.71 - linear*0.1)
-            self.k_a = nn.Parameter(torch.zeros(1,1,C)+1.02)
-            self.r_k = nn.Parameter(torch.zeros(H,N)-0.04)
+    def reset_parameters(self):
+        '''
+        Initialize the parameters of the model based on the layer_id.
+        '''
 
-            self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
-            self.receptance = nn.Linear(C, C, bias=False)
-            self.key = nn.Linear(C, C, bias=False)
-            self.value = nn.Linear(C, C, bias=False)
-            self.output = nn.Linear(C, C, bias=False)
-            self.ln_x = nn.GroupNorm(H, C, eps=64e-5) # !!! notice eps value !!!
+        device = self.x_r.device
 
-            self.receptance.weight.data.uniform_(-0.5/(C**0.5), 0.5/(C**0.5))
-            self.key.weight.data.uniform_(-0.05/(C**0.5), 0.05/(C**0.5))
-            self.value.weight.data.uniform_(-0.5/(C**0.5), 0.5/(C**0.5))
-            self.output.weight.data.zero_()
+        H = self.n_head
+        N = self.head_size
+        C = self.args.n_embd
+
+        with torch.device(device):
+            with torch.no_grad():
+                ratio_0_to_1 = self.layer_id / (self.args.n_layer - 1)  # 0 to 1
+                ratio_1_to_almost0 = 1.0 - (self.layer_id / self.args.n_layer)  # 1 to ~0
+                ddd = torch.ones(1, 1, C)
+                for i in range(C):
+                    ddd[0, 0, i] = i / C
+
+                self.x_r.data = 1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0)
+                self.x_w.data = 1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0)
+                self.x_k.data = 1.0 - torch.pow(ddd, 0.7 * ratio_1_to_almost0)
+                self.x_v.data = 1.0 - torch.pow(ddd, 0.7 * ratio_1_to_almost0)
+                self.x_a.data = 1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0)
+                self.x_g.data = 1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0)
+
+                def ortho_init(x, scale) -> torch.Tensor:
+                    with torch.no_grad():
+                        shape = x.shape
+                        if len(shape) == 2:
+                            gain = math.sqrt(shape[0] / shape[1]) if shape[0] > shape[1] else 1
+                            nn.init.orthogonal_(x, gain=gain * scale)
+                        elif len(shape) == 3:
+                            gain = math.sqrt(shape[1] / shape[2]) if shape[1] > shape[2] else 1
+                            for i in range(shape[0]):
+                                nn.init.orthogonal_(x[i], gain=gain * scale)
+                        else:
+                            raise ValueError(f"Unsupported shape {shape} for orthogonal initialization")
+                        return x
+
+                www = torch.zeros(C)
+                zigzag = torch.zeros(C)
+                linear = torch.zeros(C)
+
+                for n in range(C):
+                    linear[n] = n / (C-1) - 0.5
+                    zigzag[n] = ((n % N) - ((N-1) / 2)) / ((N-1) / 2)
+                    zigzag[n] = zigzag[n] * abs(zigzag[n])
+                    www[n] = -6 + 6 * (n / (C - 1)) ** (1 + 1 * ratio_0_to_1 ** 0.3)
+
+                self.w1.data = torch.zeros(C, self.D_DECAY_LORA)
+                self.w2.data = ortho_init(torch.zeros(self.D_DECAY_LORA, C), 0.1)
+                self.w0.data = www.reshape(1,1,C) + 0.5 + zigzag*2.5 # !!! 0.5 comes from F.softplus !!!
+
+                self.a1.data = torch.zeros(C, self.D_AAA_LORA)
+                self.a2.data = ortho_init(torch.zeros(self.D_AAA_LORA, C), 0.1)
+                self.a0.data = torch.zeros(1, 1, C) - 0.19 + zigzag*0.3 + linear*0.4
+
+                self.v1.data = torch.zeros(C, self.D_MV_LORA)
+                self.v2.data = ortho_init(torch.zeros(self.D_MV_LORA, C), 0.1)
+                self.v0.data = torch.zeros(1, 1, C)+0.73 - linear*0.4
+
+                self.g1.data = torch.zeros(C, self.D_GATE_LORA)
+                self.g2.data = ortho_init(torch.zeros(self.D_GATE_LORA, C), 0.1)
+
+                self.k_k.data = torch.zeros(1, 1, C)+0.71 - linear*0.1
+                self.k_a.data = torch.zeros(1, 1, C)+1.02
+                self.r_k.data = torch.zeros(H, N)-0.04
+
+                # self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
+                nn.init.orthogonal_(self.receptance.weight.data, gain=1.0)  # type: ignore
+                nn.init.orthogonal_(self.key.weight.data, gain=0.1)   # type: ignore
+                nn.init.orthogonal_(self.value.weight.data, gain=1.0)  # type: ignore
+                self.output.weight.data = torch.zeros(C, C)
+
+                layer_scale = (1+self.layer_id) / self.args.n_layer
+                self.ln_x.weight.data = torch.ones(C) * (layer_scale ** 0.7)
+                self.ln_x.bias.data = torch.zeros_like(self.ln_x.bias.data) # type: ignore
+
 
     @MyFunction
     def forward(self, x, v_first):
@@ -201,20 +256,32 @@ class RWKV_CMix_x070(MyModule):
         super().__init__()
         self.args = args
         self.layer_id = layer_id
+
+        C = args.n_embd
+
+        # the parameters
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
+        self.x_k = nn.Parameter(torch.empty(1, 1, C))
+        self.key = skip_init(nn.Linear, C, C * 4, bias=False)
+        self.value = skip_init(nn.Linear, C * 4, C, bias=False)
+
+
+    def reset_parameters(self):
+
+        device = self.key.weight.device
+
+        C = self.args.n_embd
 
         with torch.no_grad():
-            ratio_1_to_almost0 = 1.0 - (layer_id / args.n_layer)  # 1 to ~0
-            ddd = torch.ones(1, 1, args.n_embd)
-            for i in range(args.n_embd):
-                ddd[0, 0, i] = i / args.n_embd
-            self.x_k = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0**4))
+            with torch.device(device):
+                ratio_1_to_almost0 = 1.0 - (self.layer_id / self.args.n_layer)  # 1 to ~0
+                ddd = torch.ones(1, 1, C)
+                for i in range(C):
+                    ddd[0, 0, i] = i / C
+                self.x_k.data = 1.0 - torch.pow(ddd, ratio_1_to_almost0**4)
 
-        self.key = nn.Linear(args.n_embd, args.n_embd * 4, bias=False)
-        self.value = nn.Linear(args.n_embd * 4, args.n_embd, bias=False)
-
-        self.key.weight.data.uniform_(-0.5/(args.n_embd**0.5), 0.5/(args.n_embd**0.5))
-        self.value.weight.data.zero_()
+                nn.init.orthogonal_(self.key.weight.data, gain=1.0)  # type: ignore
+                self.value.weight.data = torch.zeros(C, C * 4)
 
     @MyFunction
     def forward(self, x):
@@ -236,14 +303,37 @@ class Block(nn.Module):
         self.args = args
         self.layer_id = layer_id
 
-        self.ln1 = nn.LayerNorm(args.n_embd)
-        self.ln2 = nn.LayerNorm(args.n_embd)
+        self.ln1 = skip_init(nn.LayerNorm, args.n_embd)
+        self.ln2 = skip_init(nn.LayerNorm, args.n_embd)
 
         if self.layer_id == 0:
-            self.ln0 = nn.LayerNorm(args.n_embd)
+            self.ln0 = skip_init(nn.LayerNorm, args.n_embd)
 
         self.att = RWKV_Tmix_x070(args, layer_id)
         self.ffn = RWKV_CMix_x070(args, layer_id)
+
+    def reset_parameters(self):
+
+        C = self.args.n_embd
+
+        device = self.ln1.weight.device
+
+        with torch.device(device):
+            ln1 = nn.LayerNorm(C)
+            self.ln1.weight.data = ln1.weight.data
+            self.ln1.bias.data = ln1.bias.data
+
+            ln2 = nn.LayerNorm(C)
+            self.ln2.weight.data = ln2.weight.data
+            self.ln2.bias.data = ln2.bias.data
+
+            if self.layer_id == 0:
+                ln0 = nn.LayerNorm(C)
+                self.ln0.weight.data = ln0.weight.data
+                self.ln0.bias.data = ln0.bias.data
+
+            self.att.reset_parameters()
+            self.ffn.reset_parameters()
         
     def forward(self, x, v_first):
         if self.layer_id == 0:
@@ -285,12 +375,36 @@ class RWKV(pl.LightningModule):
         assert args.dim_att % 32 == 0
         assert args.dim_ffn % 32 == 0
 
-        self.emb = nn.Embedding(args.vocab_size, args.n_embd)
+        C = args.n_embd
+
+        self.emb = skip_init(nn.Embedding, args.vocab_size, C)
 
         self.blocks = nn.ModuleList([Block(args, i) for i in range(args.n_layer)])
 
-        self.ln_out = nn.LayerNorm(args.n_embd)
-        self.head = nn.Linear(args.n_embd, args.vocab_size, bias=False)
+        self.ln_out = skip_init(nn.LayerNorm, C)
+        self.head = skip_init(nn.Linear, C, args.vocab_size, bias=False)
+
+    def reset_parameters(self):
+        # embedding layer
+        scale_emb = -1e-4
+        nn.init.uniform_(self.emb.weight, a=scale_emb, b=-scale_emb)    # type: ignore
+
+        for block in self.blocks:
+            block.reset_parameters()
+
+        # ln_out
+        ln_out = nn.LayerNorm(self.args.n_embd)
+        self.ln_out.weight.data = ln_out.weight.data
+        self.ln_out.bias.data = ln_out.bias.data
+
+
+        # head layer
+        if self.args.vocab_size > self.args.n_embd:
+            scale = 0.5 * math.sqrt(self.args.vocab_size / self.args.n_embd)
+        else:
+            scale = 0.5
+        nn.init.orthogonal_(self.head.weight, gain=scale)  # type: ignore
+
 
     def configure_optimizers(self):
         args = self.args
@@ -310,6 +424,7 @@ class RWKV(pl.LightningModule):
         lr_1x = sorted(list(lr_1x))
         lr_2x = sorted(list(lr_2x))
 
+        # print the learning rate groups for debugging
         if self.trainer.is_global_zero:
             print('decay', lr_decay, '\n')
             print('1x', lr_1x, '\n')
@@ -327,6 +442,7 @@ class RWKV(pl.LightningModule):
             if self.deepspeed_offload:
                 return DeepSpeedCPUAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adamw_mode=True, amsgrad=False)
             return FusedAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adam_w_mode=True, amsgrad=False)
+        
         else:
             if self.deepspeed_offload:
                 return DeepSpeedCPUAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adamw_mode=False, weight_decay=0, amsgrad=False)
@@ -369,6 +485,14 @@ class RWKV(pl.LightningModule):
         if self.trainer.is_global_zero:
             self.trainer.my_loss_all = all
 
+
+
+
+
+
+
+
+
     def generate_init_weight(self):
         print(
             f"""
@@ -379,74 +503,20 @@ class RWKV(pl.LightningModule):
 ############################################################################
 """
         )
+        self.reset_parameters()
+
         m = {}
         n_params = 0
+
         for n in self.state_dict():
             p = self.state_dict()[n]
-            shape = p.shape
-
-            s0 = str(shape[0]) if len(shape) > 0 else ""
-            s1 = str(shape[1]) if len(shape) > 1 else ""
-            s2 = str(shape[2]) if len(shape) > 2 else ""
-            s3 = str(shape[3]) if len(shape) > 3 else ""
-            print(f"{s0.ljust(5)} {s1.ljust(5)} {s2.ljust(5)} {s3.ljust(5)} {n}", end="")
-
-            scale = 1.0
-            if "ln_" in n or ".ln" in n or "time_" in n or "_mask" in n or "pos_emb" in n or '.mask.' in n or n.endswith('_w') or n.endswith('_w1') or n.endswith('_w2') or n.endswith('_bias') or (".weight" not in n):
-                if 'ln_x.weight' in n:
-                    layer_scale = (1+int(n.split('.')[1])) / self.args.n_layer
-                    m[n] = (p * 0.0) + (layer_scale ** 0.7)
-                else:
-                    m[n] = p
-                print()
-            elif n == "emb.weight":
-                m[n] = p
-                scale = -1e-4
-                nn.init.uniform_(m[n], a=scale, b=-scale)
-                print(f" [scale {scale}]")
-            elif n == "head.weight":
-                m[n] = p
-                if self.args.vocab_size > self.args.n_embd:
-                    scale = 0.5 * math.sqrt(self.args.vocab_size / self.args.n_embd)
-                else:
-                    scale = 0.5
-                nn.init.orthogonal_(m[n], gain=scale)
-                print(f" [scale {scale}]")
-            else:
-                assert n.endswith('.weight') # should always be true
-
-                zero = [".att.output.", ".ffn.value.", ".ffn.receptance.", ".ffnPre.value.", ".ffnPre.receptance.", "head_q.", '.oo.', '.rr.']
-
-                for kk in zero:
-                    if kk in n:
-                        scale = 0
-
-                for kk in [".att.key."]:
-                    if kk in n:
-                        scale = 0.1
-                for kk in [".att.gate."]:
-                    if kk in n:
-                        scale = 0.1
-
-                print(f" [scale {scale}]")
-
-                if self.args.accelerator.upper() == "GPU":
-                    m[n] = torch.empty((shape[0], shape[1]), device="cuda")
-                else:
-                    m[n] = torch.empty((shape[0], shape[1]))
-
-                if scale == 0:
-                    nn.init.zeros_(m[n])
-                elif scale < 0:
-                    nn.init.uniform_(m[n], a=scale, b=-scale)
-                else:
-                    nn.init.orthogonal_(m[n], gain=scale)
-
-            m[n] = m[n].cpu()
+            
+            m[n] = p.cpu()
             if os.environ["RWKV_FLOAT_MODE"] == "fp16":
                 m[n] = m[n].half()
             elif os.environ["RWKV_FLOAT_MODE"] == "bf16":
                 m[n] = m[n].bfloat16()
+
             n_params += m[n].numel()
 
         print('model params', n_params)
