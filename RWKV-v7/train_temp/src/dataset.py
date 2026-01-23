@@ -9,7 +9,11 @@ from torch.utils.data import Dataset
 from pytorch_lightning.utilities import rank_zero_info
 from .binidx import MMapIndexedDataset
 
-def is_prime(n):
+
+def is_prime(n: int) -> bool:
+    '''
+    Check if a number is prime.
+    '''
     if n <= 1:
         return False
     if n <= 3:

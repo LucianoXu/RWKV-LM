@@ -46,6 +46,22 @@ def data_file_path(prefix_path):
     return prefix_path + ".bin"
 
 class MMapIndexedDataset(torch.utils.data.Dataset):
+    '''
+    ┌────────────────────────────────────────────────────────────────────────┐
+    │  <prefix>.idx  (metadata)                                              │
+    ├──────────┬─────────────────────────────────────────────────────────────┤
+    │ Offset   │ Content (little-endian unless noted)                        │
+    ├──────────┼─────────────────────────────────────────────────────────────┤
+    │ 0x00     │ b"MMIDIDX\x00\x00"              # 9-byte magic header       │
+    │ 0x09     │ uint64  version = 1             # future-proofing           │
+    │ 0x11     │ uint8   dtype_code              # maps to NumPy dtype       │
+    │ 0x12     │ uint64  N = number_of_items     # len(sizes)                │
+    │ 0x1A     │ uint64  D = number_of_documents # len(doc_idx)              │
+    │ 0x22     │ int32[N] sizes                  # length of each item       │
+    │          │ int64[N] pointers               # byte offset → .bin        │
+    │          │ int64[D] doc_idx                # document-to-item mapping  │
+    └──────────┴─────────────────────────────────────────────────────────────┘
+    '''
     class Index(object):
         _HDR_MAGIC = b"MMIDIDX\x00\x00"
 

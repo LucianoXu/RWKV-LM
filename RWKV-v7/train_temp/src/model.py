@@ -306,9 +306,6 @@ class Block(nn.Module):
         self.ln1 = skip_init(nn.LayerNorm, args.n_embd)
         self.ln2 = skip_init(nn.LayerNorm, args.n_embd)
 
-        if self.layer_id == 0:
-            self.ln0 = skip_init(nn.LayerNorm, args.n_embd)
-
         self.att = RWKV_Tmix_x070(args, layer_id)
         self.ffn = RWKV_CMix_x070(args, layer_id)
 
@@ -327,18 +324,10 @@ class Block(nn.Module):
             self.ln2.weight.data = ln2.weight.data
             self.ln2.bias.data = ln2.bias.data
 
-            if self.layer_id == 0:
-                ln0 = nn.LayerNorm(C)
-                self.ln0.weight.data = ln0.weight.data
-                self.ln0.bias.data = ln0.bias.data
-
             self.att.reset_parameters()
             self.ffn.reset_parameters()
         
     def forward(self, x, v_first):
-        if self.layer_id == 0:
-            x = self.ln0(x)
-
         x_attn, v_first = self.att(self.ln1(x), v_first)
         x = x + x_attn
 
@@ -379,6 +368,8 @@ class RWKV(pl.LightningModule):
 
         self.emb = skip_init(nn.Embedding, args.vocab_size, C)
 
+        self.ln_in = skip_init(nn.LayerNorm, args.n_embd)
+
         self.blocks = nn.ModuleList([Block(args, i) for i in range(args.n_layer)])
 
         self.ln_out = skip_init(nn.LayerNorm, C)
@@ -388,6 +379,11 @@ class RWKV(pl.LightningModule):
         # embedding layer
         scale_emb = -1e-4
         nn.init.uniform_(self.emb.weight, a=scale_emb, b=-scale_emb)    # type: ignore
+
+        # ln_in
+        ln_in = nn.LayerNorm(self.args.n_embd)
+        self.ln_in.weight.data = ln_in.weight.data
+        self.ln_in.bias.data = ln_in.bias.data
 
         for block in self.blocks:
             block.reset_parameters()
@@ -463,6 +459,8 @@ class RWKV(pl.LightningModule):
 
         x = self.emb(idx)
 
+        x = self.ln_in(x)
+
         v_first = torch.empty_like(x)
         for block in self.blocks:
             if args.grad_cp == 1:
@@ -484,13 +482,6 @@ class RWKV(pl.LightningModule):
         all = self.all_gather(batch_parts)
         if self.trainer.is_global_zero:
             self.trainer.my_loss_all = all
-
-
-
-
-
-
-
 
 
     def generate_init_weight(self):
