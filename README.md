@@ -1,20 +1,33 @@
 # RWKV: Parallelizable RNN with Transformer-level LLM Performance (pronounced as "RwaKuv" (rʌkuv in IPA), from 4 major params: R W K V)
 
-RWKV website: https://rwkv.com (with 90+ RWKV-related papers)
+RWKV website: https://rwkv.com (with 150+ papers training various RWKV models)
 
 RWKV twitter: https://twitter.com/BlinkDL_AI (lastest news)
 
-RWKV discord: https://discord.gg/bDSBUMeFpc (9k+ members)
+RWKV discord: https://discord.gg/bDSBUMeFpc
 
 RWKV-7 "Goose" is the strongest **linear-time** & **constant-space** (no kv-cache) & **attention-free** & 100% RNN architecture on this planet at this moment, suitable for LLM and multimodal applications and more (see [rwkv.com](https://rwkv.com)).
-
-**IMPORTANT**: Use PreLN LayerNorm (instead of RMSNorm) for RWKV. I think it's related to better initial state, because I am not using trainable initial state (found it useless when using LayerNorm).
 
 RWKV-7 is a [meta-in-context learner](https://raw.githubusercontent.com/BlinkDL/RWKV-LM/main/RWKV-v7.png), test-time-training its state on the context via in-context gradient descent at every token.
 
 RWKV is a [Linux Foundation AI project](https://lfaidata.foundation/projects/rwkv/), so totally free. RWKV runtime is [already in Windows & Office](https://x.com/BlinkDL_AI/status/1831012419508019550).
 
 You are welcome to ask the RWKV community (such as [RWKV discord](https://discord.gg/bDSBUMeFpc)) for advice on upgrading your attention/ssm models to rwkv7 models :)
+
+**Efficient inference project**: https://github.com/BlinkDL/Albatross
+
+**Fast RWKV-7 CUDA kernels (vanilla, state-tuning, state-passing infctx)**: https://github.com/BlinkDL/RWKV-CUDA/tree/main/rwkv7_fast_fused
+
+**RWKV APP**: https://github.com/RWKV-APP/RWKV_APP (local inference for Android / iOS)
+
+**Simplified RWKV-7 training demo**: https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/train_temp/rwkv7_train_simplified.py
+
+**Important** (all shown in rwkv7_train_simplified.py):
+* Use PreLN LayerNorm (instead of RMSNorm) for RWKV. I think it's related to better initial state, because I am not using trainable initial state (found it useless when using LayerNorm).
+* Only apply weight decay to large matrix parameters (basically projections) in your model instead of all parameters. THIS IS VERY IMPORTANT.
+* Use correct initialization.
+
+Improving RNNs: https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-8.md
 
 ===
 
@@ -30,9 +43,13 @@ So if you need to use RWKV-7 for another task, please study train_temp code (onl
 
 ===
 
-History of RWKV (from v1 to v7): https://wiki.rwkv.com/advance/architecture.html (note: AI-written. might contain errors)
+RWKV-8:
 
-<img src="RWKV-v7-niah.png">
+<img src="RWKV-8-ROSA.png">
+
+===
+
+History of RWKV (from v1 to v7): [https://wiki.rwkv.com](https://wiki.rwkv.com/) (note: AI-written. might contain errors)
 
 Gradio Demo 1: https://huggingface.co/spaces/BlinkDL/RWKV-Gradio-1
 
@@ -78,7 +95,9 @@ RWKV-6 demo code: https://github.com/BlinkDL/ChatRWKV/blob/main/RWKV_v6_demo.py
 
 ## HOW TO TRAIN RWKV-7/6/5 on MiniPile (1.5G tokens) ##
 
-For reference, use python 3.10+, torch 2.5+, cuda 12.5+, latest deepspeed, but **keep pytorch-lightning==1.9.5**
+For reference, use python 3.10+, torch 2.5+, cuda 12.4+, latest deepspeed, but **keep pytorch-lightning==1.9.5**
+
+### Note: seems deepspeed 0.17.x is buggy (worse loss or divergence). Use 0.16.8 for reference (maybe --layerwise_lr 0 can fix it)
 
 **Train RWKV-7:**
 ```
@@ -257,6 +276,14 @@ ffn.receptance.weight => zero
 4. in trainer.py do "lr = lr * (0.01 + 0.99 * trainer.global_step / w_step)" (originally 0.2 + 0.8), and "--warmup_steps 20"
 
 5. "--weight_decay 0.1" leads to better final loss if you are training lots of data. set lr_final to 1/100 of lr_init when doing this.
+
+### Misc
+
+RWKV-7 can do math. See https://github.com/BlinkDL/RWKV-LM/blob/main/Research/rwkv7-g0-7.2b.md for details.
+
+<img width="555" height="784" alt="image" src="https://github.com/user-attachments/assets/095b4576-962f-4274-ae1a-855406ec76c1" />
+
+<img src="RWKV-v7-niah.png">
 
 ## Introducing RWKV
 

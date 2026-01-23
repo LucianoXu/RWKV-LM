@@ -2,7 +2,7 @@
 # The RWKV Language Model - https://github.com/BlinkDL/RWKV-LM
 ########################################################################################################
 #
-# This is GPT-mode + RNN-mode, more efficient and a bit more difficult
+# This version is GPT-mode + RNN-mode, and a bit more difficult to understand
 #
 ########################################################################################################
 
@@ -30,18 +30,20 @@ MyStatic = torch.jit.script
 
 ########################################################################################################
 
+print('\nNOTE: this is very inefficient (loads all weights to VRAM). better method is to prefetch DeepEmbed from RAM/SSD\n')
+
 args = types.SimpleNamespace()
 
-# model download: https://huggingface.co/BlinkDL/rwkv7-g1
+# model download: https://huggingface.co/BlinkDL/rwkv7-g1 // please compare with rwkv_v7_demo_fast.py
 
-args.MODEL_NAME = "/mnt/e/RWKV-Runner/models/rwkv7-g1a-0.1b-20250728-ctx4096"
+args.MODEL_NAME = "/mnt/e/RWKV-Runner/models/rwkv7a-g1b-0.1b-20250819-ctx4096"
 
 args.n_layer = 12
 args.n_embd = 768
 args.vocab_size = 65536
 args.head_size = 64
 
-prompt = "User: simulate SpaceX mars landing using python\n\nAssistant: <think"
+prompt = "Assistant: <think>The Eiffel tower is in the city of"
 NUM_TRIALS = 1
 LENGTH_PER_TRIAL = 500
 TEMPERATURE = 1.0
@@ -99,6 +101,10 @@ class RWKV_x070(MyModule):
         assert self.head_size == args.head_size
 
         z['emb.weight'] = F.layer_norm(z['emb.weight'], (args.n_embd,), weight=z['blocks.0.ln0.weight'], bias=z['blocks.0.ln0.bias'])
+
+        for i in range(self.n_layer): # !!! merge emb residual !!!
+            z[f'blocks.{i}.ffn.s_emb.weight'] = z[f'blocks.{i}.ffn.s_emb.weight'] + z['emb.weight'] @ z[f'blocks.{i}.ffn.s_emb_x.weight'].t()
+
         z['blocks.0.att.v0'] = z['blocks.0.att.a0'] # actually ignored
         z['blocks.0.att.v1'] = z['blocks.0.att.a1'] # actually ignored
         z['blocks.0.att.v2'] = z['blocks.0.att.a2'] # actually ignored
@@ -143,7 +149,7 @@ class RWKV_x070(MyModule):
 
                 xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln2.weight'], bias=z[bbb+'ln2.bias'])
 
-                xx, state[i*3+2] = RWKV_x070_CMix_one(xx, state[i*3+2], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'])
+                xx, state[i*3+2] = RWKV_x070_CMix_one(xx, state[i*3+2], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'], z[ffn+'s_emb.weight'][idx], z[ffn+'s1'], z[ffn+'s2'], z[ffn+'s0'])
                 x = x + xx
             
             x = F.layer_norm(x, (self.n_embd,), weight=z['ln_out.weight'], bias=z['ln_out.bias'])
@@ -174,7 +180,7 @@ class RWKV_x070(MyModule):
 
                 xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln2.weight'], bias=z[bbb+'ln2.bias'])
 
-                xx, state[i*3+2] = RWKV_x070_CMix_seq(xx, state[i*3+2], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'])
+                xx, state[i*3+2] = RWKV_x070_CMix_seq(xx, state[i*3+2], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'], z[ffn+'s_emb.weight'][idx], z[ffn+'s1'], z[ffn+'s2'], z[ffn+'s0'])
                 x = x + xx
             
             if not full_output: x = x[-1,:]
@@ -248,17 +254,22 @@ def RWKV_x070_TMix_seq(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x
 ########################################################################################################
 
 @MyStatic
-def RWKV_x070_CMix_one(x, x_prev, x_k, K_, V_):
+def RWKV_x070_CMix_one(x, x_prev, x_k, K_, V_, semb_, s1_, s2_, s0_):
     xx = x_prev - x
     k = x + xx * x_k
     k = torch.relu(k @ K_) ** 2
+    ss = (x @ s1_) @ semb_.view(32,32)
+    k = k * ((ss @ s2_) + s0_)
     return k @ V_, x
 
 @MyStatic
-def RWKV_x070_CMix_seq(x, x_prev, x_k, K_, V_):
+def RWKV_x070_CMix_seq(x, x_prev, x_k, K_, V_, semb_, s1_, s2_, s0_):
+    T,C = x.shape
     xx = torch.cat((x_prev.unsqueeze(0), x[:-1,:])) - x
     k = x + xx * x_k
-    k = torch.relu(k @ K_) ** 2
+    k = torch.relu(k @ K_) ** 2    
+    ss = (x @ s1_).view(T,1,32) @ semb_.view(T,32,32)
+    k = k * ((ss.view(T,32) @ s2_) + s0_)
     return k @ V_, x[-1,:]
 
 ########################################################################################################
